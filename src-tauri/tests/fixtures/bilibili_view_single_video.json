@@ -1,0 +1,25 @@
+{
+  "code": 0,
+  "message": "0",
+  "data": {
+    "aid": 116928672695184,
+    "bvid": "BV1btKG6PEKU",
+    "title": "世 纪 辐 射【上】",
+    "desc": "",
+    "pic": "https://i1.hdslb.com/bfs/archive/5f9e31ab22f5014f9e51970f0bf857124ecc5735.jpg",
+    "duration": 7444,
+    "owner": {
+      "mid": 39627524,
+      "name": "食贫道",
+      "face": "https://i2.hdslb.com/bfs/face/eef12b850c10b0d7a7929236abb08604955823c0.jpg"
+    },
+    "pages": [
+      {
+        "cid": 40002191561,
+        "page": 1,
+        "part": "世 纪 辐 射【上】",
+        "duration": 7444
+      }
+    ]
+  }
+}

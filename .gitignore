@@ -12,6 +12,7 @@ BBDown.data
 BBDownTV.data
 qrcode.png
 release/
+docs/
 
 .env
 .env.*

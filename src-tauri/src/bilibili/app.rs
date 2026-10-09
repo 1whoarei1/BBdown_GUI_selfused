@@ -293,9 +293,10 @@ async fn rpc(
     };
     let mut request = client
         .http
-        .post(endpoint)
+        .post(client.api_target(endpoint))
         .timeout(std::time::Duration::from_secs(45))
-        .version(reqwest::Version::HTTP_2)
+        // The subtitle gateway also serves gRPC-framed messages over HTTP/1.1.
+        // Let TLS negotiate the supported version instead of requiring HTTP/2.
         .header("user-agent", UA)
         .header("content-type", "application/grpc")
         .header("te", "trailers")
@@ -542,6 +543,108 @@ pub async fn subtitles(client: &BiliClient, part: &ContentPart) -> Result<Vec<Va
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn subtitle_rpc_accepts_http1_gateway_and_decodes_grpc_payload() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let response = pack_message(
+            &DmReply {
+                subtitle: Some(VideoSubtitle {
+                    subtitles: vec![SubtitleItem {
+                        language: "zh-CN".into(),
+                        url: "https://example.com/subtitle.json".into(),
+                    }],
+                }),
+            }
+            .encode_to_vec(),
+        )
+        .unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = vec![];
+            let header_end = loop {
+                let mut buffer = [0; 4096];
+                let count = socket.read(&mut buffer).await.unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&buffer[..count]);
+                if let Some(end) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&bytes[..header_end]);
+            assert!(headers.lines().next().unwrap().ends_with(" HTTP/1.1"));
+            let size = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            while bytes.len() < header_end + size {
+                let mut buffer = [0; 4096];
+                let count = socket.read(&mut buffer).await.unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&buffer[..count]);
+            }
+            let payload = DmRequest::decode(
+                read_message(&bytes[header_end..header_end + size])
+                    .unwrap()
+                    .as_slice(),
+            )
+            .unwrap();
+            assert_eq!((payload.aid, payload.cid), (170001, 279786));
+            let headers = format!("HTTP/1.1 200 OK\r\nContent-Type: application/grpc\r\nContent-Length: {}\r\ngrpc-status: 0\r\ngrpc-encoding: gzip\r\nConnection: close\r\n\r\n", response.len());
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            socket.write_all(&response).await.unwrap();
+        });
+        let mut client = BiliClient::new(&crate::core::default_config()).unwrap();
+        client.http = reqwest::Client::builder().no_proxy().build().unwrap();
+        client.api_origin = Some(format!("http://{address}"));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            subtitles(
+                &client,
+                &ContentPart {
+                    aid: 170001,
+                    cid: 279786,
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result[0]["lan"], "zh-CN");
+        assert_eq!(
+            result[0]["subtitle_url"],
+            "https://example.com/subtitle.json"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the live APP subtitle service; does not use local credentials"]
+    async fn live_app_subtitle_gateway_negotiates_supported_http_version() {
+        let client = BiliClient::new(&crate::core::default_config()).unwrap();
+        let rows = subtitles(
+            &client,
+            &ContentPart {
+                aid: 170001,
+                cid: 279786,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(rows
+            .iter()
+            .all(|row| !super::super::client::string(&row["subtitle_url"]).is_empty()));
+    }
     #[test]
     fn framing_rejects_truncation_and_round_trips_gzip() {
         let bytes = b"protobuf fixture";

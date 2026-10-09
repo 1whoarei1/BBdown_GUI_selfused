@@ -38,6 +38,8 @@ BBDown Next 是一个面向 Windows 的 B 站下载器，使用 Tauri 2、React�
 
 核心包含 WEB、TV、APP、INTL 四种播放接口，仍只调用 FFmpeg 处理媒体。开发和运行均不需要 .NET 或额外的 Protobuf 编译器。
 
+APP 请求自动协商 HTTP 版本，兼容仅支持 HTTP/1.1 的字幕网关。WEB 明确返回空字幕列表且不要求登录时，直接跳过字幕；接口失败或需要登录才能查看时，仍尝试其他字幕接口。
+
 | 接口 | 内容 | 凭据 |
 | --- | --- | --- |
 | WEB | 普通视频、多 P、番剧、课程 | WEB 扫码 / 浏览器 Cookie |
@@ -149,6 +151,7 @@ cargo test --manifest-path src-tauri/Cargo.toml live_web_parse_smoke -- --ignore
 cargo test --manifest-path src-tauri/Cargo.toml live_download_smoke -- --ignored
 cargo test --manifest-path src-tauri/Cargo.toml live_tv_and_app_playback -- --ignored
 cargo test --manifest-path src-tauri/Cargo.toml live_tv_qr_generation_and_pending_poll -- --ignored
+cargo test --manifest-path src-tauri/Cargo.toml live_app_subtitle_gateway_negotiates_supported_http_version -- --ignored
 cargo test --manifest-path src-tauri/Cargo.toml live_collection_resolves_all_entries -- --ignored
 cargo test --manifest-path src-tauri/Cargo.toml live_space_metadata_or_validation_response -- --ignored
 cargo test --manifest-path src-tauri/Cargo.toml live_intl_metadata_and_permission_response -- --ignored

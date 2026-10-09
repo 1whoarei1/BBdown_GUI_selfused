@@ -42,12 +42,16 @@ pub async fn lookup(
             Ok(value)
         }) {
             Ok(value) => {
-                let rows = value["data"]["subtitle"]["subtitles"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
+                let Some(rows) = value["data"]["subtitle"]["subtitles"].as_array() else {
+                    last_error = Some("WEB 字幕响应缺少列表".into());
+                    continue;
+                };
                 if !rows.is_empty() {
-                    return Ok(normalize(rows));
+                    return Ok(normalize(rows.clone()));
+                }
+                if value["data"]["need_login_subtitle"].as_bool() == Some(false) {
+                    // A successful, unrestricted empty list is an authoritative absence.
+                    return Ok(vec![]);
                 }
                 confirmed_empty = true;
             }
@@ -82,4 +86,64 @@ fn normalize(rows: Vec<Value>) -> Vec<SubtitleSource> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bilibili::test_support::JsonServer;
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn confirmed_empty_web_subtitles_do_not_request_app_fallback() {
+        let requests = Arc::new(Mutex::new(vec![]));
+        let captured = requests.clone();
+        let server = JsonServer::new(move |url, _, _| {
+            captured.lock().unwrap().push(url.path().to_string());
+            match url.path() {
+                "/x/web-interface/nav" => serde_json::json!({"data":{"wbi_img":{"img_url":"https://example.com/0123456789abcdef0123456789abcdef.png","sub_url":"https://example.com/fedcba9876543210fedcba9876543210.png"}}}),
+                "/x/player/wbi/v2" => serde_json::json!({"code":0,"data":{"need_login_subtitle":false,"subtitle":{"subtitles":[]}}}),
+                _ => panic!("unexpected fallback: {}", url.path()),
+            }
+        }).await;
+        let mut client = BiliClient::new(&crate::core::default_config()).unwrap();
+        client.api_origin = Some(server.url.clone());
+        assert!(lookup(
+            &mut client,
+            &ContentPart {
+                aid: 1,
+                cid: 2,
+                ..Default::default()
+            }
+        )
+        .await
+        .unwrap()
+        .is_empty());
+        assert_eq!(
+            *requests.lock().unwrap(),
+            ["/x/web-interface/nav", "/x/player/wbi/v2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_web_subtitle_response_is_not_reported_as_no_subtitles() {
+        let server = JsonServer::new(|url, _, _| {
+            match url.path() {
+                "/x/web-interface/nav" => serde_json::json!({"data":{"wbi_img":{"img_url":"https://example.com/0123456789abcdef0123456789abcdef.png","sub_url":"https://example.com/fedcba9876543210fedcba9876543210.png"}}}),
+                _ => serde_json::json!({"code":0,"data":{}}),
+            }
+        }).await;
+        let mut client = BiliClient::new(&crate::core::default_config()).unwrap();
+        client.api_origin = Some(server.url.clone());
+        assert!(lookup(
+            &mut client,
+            &ContentPart {
+                aid: 1,
+                cid: 2,
+                ..Default::default()
+            }
+        )
+        .await
+        .is_err());
+    }
 }

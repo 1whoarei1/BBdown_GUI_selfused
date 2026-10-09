@@ -141,7 +141,7 @@ impl BiliClient {
         response.error_for_status().map_err(network_error)
     }
 
-    fn api_target(&self, url: &str) -> String {
+    pub(crate) fn api_target(&self, url: &str) -> String {
         #[cfg(test)]
         if let Some(origin) = &self.api_origin {
             let parsed = reqwest::Url::parse(url).unwrap();

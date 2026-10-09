@@ -2,10 +2,13 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AccountInfo,
+  ApplicationLogEntry,
   AppConfig,
   CommandPreview,
   CommandRunResult,
   DownloadRequest,
+  DownloadAction,
+  DownloadControlResult,
   LoginQrEvent,
   ParseRequest,
   ParseResult,
@@ -17,6 +20,19 @@ import type {
 
 const tauriReady = () =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+export function readApplicationLogs() {
+  return invokeOrFallback<ApplicationLogEntry[]>("read_application_logs", {}, []);
+}
+
+export function recordApplicationLog(entry: ApplicationLogEntry) {
+  return invokeOrFallback<ApplicationLogEntry>("record_application_log", { entry }, entry);
+}
+
+export async function listenApplicationLog(handler: (entry: ApplicationLogEntry) => void): Promise<UnlistenFn> {
+  if (!tauriReady()) return () => {};
+  return listen<ApplicationLogEntry>("application-log", (event) => handler(event.payload));
+}
 
 async function invokeOrFallback<T>(
   command: string,
@@ -31,11 +47,9 @@ async function invokeOrFallback<T>(
 }
 
 export const fallbackConfig: AppConfig = {
+  downloadManager: { maxConcurrentTasks: 2, connectionsPerTask: 4, resumeOnStart: false },
   tools: {
-    bbdownPath: "../bin/BBDown.exe",
-    ffmpegPath: "../bin/ffmpeg.exe",
-    mp4boxPath: "",
-    aria2cPath: "",
+    ffmpegPath: "ffmpeg",
   },
   workDir: "../download",
   auth: {
@@ -61,8 +75,6 @@ export const fallbackConfig: AppConfig = {
   },
   advanced: {
     forceHttp: false,
-    useAria2c: false,
-    useMp4box: false,
     allowPcdn: false,
     videoAscending: false,
     audioAscending: false,
@@ -70,7 +82,6 @@ export const fallbackConfig: AppConfig = {
     multiFilePattern: "",
     language: "",
     delayPerPage: 0,
-    aria2cArgs: "",
   },
 };
 
@@ -87,10 +98,8 @@ export function detectTools(config: AppConfig) {
     "detect_tools",
     { config },
     {
-      bbdownFound: false,
+      coreAvailable: false,
       ffmpegFound: false,
-      mp4boxFound: false,
-      aria2cFound: false,
       messages: ["Tauri 后端未运行"],
     },
   );
@@ -119,7 +128,7 @@ export function openBilibiliLink(url: string) {
   return invokeOrFallback<void>("open_bilibili_link", { url }, undefined);
 }
 
-export function openToolDownloadPage(tool: "bbdown" | "ffmpeg") {
+export function openToolDownloadPage(tool: "ffmpeg") {
   return invokeOrFallback<void>("open_tool_download_page", { tool }, undefined);
 }
 
@@ -128,9 +137,9 @@ export function buildPreviewCommand(request: ParseRequest) {
     "build_preview_command",
     { request },
     {
-      executable: request.config.tools.bbdownPath,
-      args: [request.input, "-info", "--show-all", "-p", "ALL"],
-      display: `${request.config.tools.bbdownPath} ${request.input} -info --show-all -p ALL`,
+      executable: "内置核心",
+      args: [],
+      display: `内置核心解析 ${request.input}`,
     },
   );
 }
@@ -140,15 +149,15 @@ export function buildDownloadPreview(request: DownloadRequest) {
     "build_download_preview",
     { request },
     {
-      executable: request.config.tools.bbdownPath,
-      args: [request.input, "--work-dir", request.config.workDir],
-      display: `${request.config.tools.bbdownPath} ${request.input} --work-dir ${request.config.workDir}`,
+      executable: "内置核心",
+      args: [],
+      display: `内置核心下载 ${request.input}，目录: ${request.config.workDir}`,
     },
   );
 }
 
 export function listTasks() {
-  return invokeOrFallback<TaskSnapshot[]>("list_tasks", {}, []);
+  return invokeOrFallback<TaskSnapshot[]>("list_tasks", {}, previewTasks);
 }
 
 export function stopTask(taskId: string) {
@@ -172,21 +181,26 @@ export function runLogin(config: AppConfig, mode: "web" | "tv") {
     { config, mode },
     {
       success: false,
-      output: "当前运行在浏览器预览模式，未调用 BBDown。",
+      output: "当前运行在浏览器预览模式，未连接内置核心。",
     },
   );
 }
 
-export function runDownload(request: DownloadRequest) {
-  return invokeOrFallback<CommandRunResult>(
-    "run_download",
-    { request },
-    {
-      success: false,
-      output: "当前运行在浏览器预览模式，未调用 BBDown。",
-    },
-  );
+let previewTasks: TaskSnapshot[] = [];
+export async function runDownload(request: DownloadRequest, title?: string) {
+  if (tauriReady()) return invoke<TaskSnapshot>("run_download", { request, title });
+  const task: TaskSnapshot = { id: crypto.randomUUID(), kind: "download", status: "paused", phase: "preparing", input: request.input,
+    title, createdAt: String(Math.floor(Date.now() / 1000)), latestMessage: "浏览器演示任务，桌面应用可执行下载", downloadDir: request.config.workDir };
+  previewTasks = [task, ...previewTasks];
+  return task;
 }
+export async function controlDownloads(taskIds: string[], action: DownloadAction) {
+  if (tauriReady()) return invoke<DownloadControlResult>("control_downloads", { taskIds, action });
+  const removed = action === "remove" ? taskIds : [];
+  previewTasks = previewTasks.filter((task) => !removed.includes(task.id)).map((task) => taskIds.includes(task.id) ? { ...task, status: action === "cancel" ? "canceled" : "paused", latestMessage: "浏览器演示模式" } : task);
+  return { updated: previewTasks.filter((task) => taskIds.includes(task.id)), removed, errors: [] };
+}
+export function openTaskDirectory(taskId: string) { return invokeOrFallback<void>("open_task_directory", { taskId }, undefined); }
 
 export function parseVideo(request: ParseRequest) {
   return invokeOrFallback<ParseResult>("parse_video", { request }, {
@@ -196,7 +210,7 @@ export function parseVideo(request: ParseRequest) {
     title: "等待 Tauri 后端",
     parts: [],
     rawOutput: "",
-    warnings: ["当前运行在浏览器预览模式，未调用 BBDown。"],
+    warnings: ["当前运行在浏览器预览模式，未连接内置核心。"],
   });
 }
 
@@ -238,7 +252,7 @@ export function parseVideoV2(request: ParseRequest) {
         badges: ["normal"],
       }],
     }],
-    metadataSource: "bilibiliAndBbdown",
+    metadataSource: "bilibili",
     warnings: [],
   });
 }

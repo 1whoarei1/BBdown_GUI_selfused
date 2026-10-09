@@ -23,7 +23,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Install frontend dependencies
         run: npm ci
@@ -37,3 +37,5 @@ jobs:
       - name: Test Rust backend
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
+      - name: Check Rust warnings
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings

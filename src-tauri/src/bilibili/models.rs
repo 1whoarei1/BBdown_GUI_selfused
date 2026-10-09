@@ -10,6 +10,7 @@ pub struct VideoMetadata {
     pub cover_url: String,
     pub owner: OwnerMetadata,
     pub duration_seconds: u64,
+    pub publish_time: Option<String>,
     pub pages: Vec<PageMetadata>,
 }
 

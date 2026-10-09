@@ -11,14 +11,23 @@ src-tauri/BBDownTV.data
 BBDown.data
 BBDownTV.data
 qrcode.png
+account.json
+tasks.json
+.bbdown-next-cache/
+*.download-lock
+login-*.svg
+*.part
+*.lock
+!package-lock.json
+!src-tauri/Cargo.lock
 release/
-docs/
 
 .env
 .env.*
 !.env.example
 
 *.log
+*.jsonl
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

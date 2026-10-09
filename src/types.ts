@@ -10,13 +10,10 @@ export type TaskStatus =
   | "canceled";
 
 export type StreamBadge = "8k" | "dolby" | "hdr" | "4k" | "high1080p" | "normal";
-export type ContentKind = "singleVideo" | "multiPartVideo" | "bangumiEpisode" | "bangumiMultiEpisode" | "unknown";
+export type ContentKind = "singleVideo" | "multiPartVideo" | "bangumiEpisode" | "bangumiMultiEpisode" | "videoList" | "unknown";
 
 export interface ToolPaths {
-  bbdownPath: string;
   ffmpegPath?: string;
-  mp4boxPath?: string;
-  aria2cPath?: string;
 }
 
 export interface AuthConfig {
@@ -44,9 +41,6 @@ export interface DownloadOptions {
 
 export interface AdvancedOptions {
   forceHttp: boolean;
-  useAria2c: boolean;
-  aria2cArgs?: string;
-  useMp4box: boolean;
   allowPcdn: boolean;
   videoAscending: boolean;
   audioAscending: boolean;
@@ -60,6 +54,7 @@ export interface AdvancedOptions {
 }
 
 export interface AppConfig {
+  downloadManager: { maxConcurrentTasks: number; connectionsPerTask: number; resumeOnStart: boolean };
   tools: ToolPaths;
   workDir: string;
   auth: AuthConfig;
@@ -129,6 +124,9 @@ export interface OwnerInfo {
 }
 
 export interface PartInfoV2 {
+  watchUrl?: string;
+  aid?: number;
+  bvid?: string;
   pageNumber: number;
   cid?: number;
   title: string;
@@ -151,26 +149,25 @@ export interface ParseResultV2 {
   durationSeconds?: number;
   coverUrl?: string;
   parts: PartInfoV2[];
-  metadataSource: "bilibiliAndBbdown" | "bbdownOnly";
+  metadataSource: "bilibili";
   warnings: string[];
   errorMessage?: string;
 }
 
 export interface AccountInfo {
+  tokenConfigured?: boolean;
   isLoggedIn: boolean;
   mid?: number;
   name?: string;
   avatarUrl?: string;
   vipLabel?: string;
-  source: "manualCookie" | "bbdownScan" | "none" | string;
+  source: "manualCookie" | "nativeScan" | "none" | string;
 }
 
 export interface ToolDetectionResult {
-  bbdownFound: boolean;
+  coreAvailable: boolean;
   ffmpegFound: boolean;
-  mp4boxFound: boolean;
-  aria2cFound: boolean;
-  bbdownVersion?: string;
+  ffmpegVersion?: string;
   messages: string[];
 }
 
@@ -197,19 +194,34 @@ export interface DownloadTask {
 }
 
 export type BackendTaskKind = "parse" | "download" | "loginWeb" | "loginTv";
-export type BackendTaskStatus = "queued" | "running" | "stopping" | "completed" | "failed" | "canceled";
+export type BackendTaskStatus = "queued" | "running" | "pausing" | "paused" | "stopping" | "completed" | "failed" | "canceled";
 export type BackendTaskPhase =
   | "preparing"
   | "loggingIn"
-  | "loadingCookie"
-  | "resolvingAid"
   | "fetchingVideoInfo"
   | "parsingPart"
   | "downloadingPart"
   | "finalizing"
   | "finished";
 
+export type DownloadAction = "pause" | "resume" | "retry" | "cancel" | "remove";
+export interface DownloadControlResult { updated: TaskSnapshot[]; removed: string[]; errors: string[]; }
 export interface TaskSnapshot {
+  createdAt?: string;
+  revision?: number;
+  queueOrder?: number;
+  downloadedBytes?: number;
+  totalBytes?: number;
+  currentFile?: string;
+  currentFileDownloaded?: number;
+  currentFileTotal?: number;
+  speedBytesPerSecond?: number;
+  etaSeconds?: number;
+  completedParts?: number;
+  selectedParts?: number;
+  outputFiles?: string[];
+  downloadDir?: string;
+  errorMessage?: string;
   id: string;
   kind: BackendTaskKind;
   status: BackendTaskStatus;
@@ -230,6 +242,12 @@ export interface TaskLogEvent {
   stream: "stdout" | "stderr" | "system";
   line: string;
   timestamp: string;
+}
+
+export interface ApplicationLogEntry {
+  id: string;
+  timestamp: string;
+  line: string;
 }
 
 export interface LoginQrEvent {

@@ -1,29 +1,32 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  Activity,
   BadgeCheck,
   ClipboardList,
   Download,
   FolderOpen,
   Search,
   Settings,
-  Square,
   Terminal,
   UserRound,
 } from "lucide-react";
 import { AccountDialog, type LoginMethod } from "./features/account/AccountDialog";
+import { DownloadsPage } from "./features/downloads/DownloadsPage";
 import { WorkspacePage, type ParseSession } from "./features/workspace/WorkspacePage";
 import {
   buildDownloadPreview,
+  controlDownloads,
+  openTaskDirectory,
   buildPreviewCommand,
   detectTools,
   fallbackConfig,
   getAccountInfo,
   getConfig,
   listenLoginQr,
-  listenTaskLog,
+  listenApplicationLog,
   listenTaskStatus,
   listTasks,
+  readApplicationLogs,
+  recordApplicationLog,
   logoutAccount,
   openBilibiliLink,
   openDownloadDirectory,
@@ -36,35 +39,19 @@ import {
 } from "./lib/api";
 import type {
   AccountInfo,
+  ApplicationLogEntry,
   AppConfig,
-  BackendTaskStatus,
+  ApiMode,
+  DownloadAction,
   LoginQrEvent,
   TaskSnapshot,
   ToolDetectionResult,
 } from "./types";
 
-interface RuntimeTask {
-  id: string;
-  kind: TaskSnapshot["kind"];
-  input: string;
-  title: string;
-  status: BackendTaskStatus;
-  phase?: TaskSnapshot["phase"];
-  latestMessage?: string;
-  currentPartIndex?: number;
-  totalParts?: number;
-  startedAt?: string;
-  finishedAt?: string;
-  exitCode?: number;
-  command: string;
-  createdAt: string;
-  output?: string;
-}
-
 type Section = "workspace" | "tasks" | "settings" | "logs";
 
 const navItems: Array<{ key: Section; label: string; icon: typeof Search }> = [
-  { key: "workspace", label: "首页", icon: Search },
+  { key: "workspace", label: "添加下载", icon: Search },
   { key: "tasks", label: "下载任务", icon: ClipboardList },
   { key: "settings", label: "设置", icon: Settings },
   { key: "logs", label: "日志", icon: Terminal },
@@ -84,15 +71,21 @@ export function App() {
   const [accountDialogOpen, setAccountDialogOpen] = useState(false);
   const [loginMethod, setLoginMethod] = useState<LoginMethod>("scan");
   const [loginBusy, setLoginBusy] = useState(false);
+  const [loginTaskId, setLoginTaskId] = useState<string | null>(null);
   const [loginQr, setLoginQr] = useState<LoginQrEvent | null>(null);
-  const [tasks, setTasks] = useState<RuntimeTask[]>([]);
-  const [logs, setLogs] = useState<string[]>([]);
+  const [tasks, setTasks] = useState<TaskSnapshot[]>([]);
+  const [logs, setLogs] = useState<ApplicationLogEntry[]>([]);
   const [activeParseTaskId, setActiveParseTaskId] = useState<string | null>(null);
-  const pendingTaskRef = useRef<{ input: string; title: string; command: string } | null>(null);
 
   const appendLog = (entry: string) => {
     const nextLines = formatLogEntry(entry);
-    if (nextLines.length) setLogs((items) => [...items, ...nextLines].slice(-260));
+    const entries = nextLines.map((line) => ({ id: crypto.randomUUID(), timestamp: String(Math.floor(Date.now() / 1000)), line }));
+    if (entries.length) setLogs((items) => mergeLogs(items, entries));
+    for (const item of entries) {
+      void recordApplicationLog(item)
+        .then((saved) => setLogs((items) => mergeLogs(items, [saved])))
+        .catch((error) => console.error("保存日志失败", error));
+    }
   };
 
   const refreshAccount = async (nextConfig: AppConfig) => {
@@ -110,6 +103,9 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
+    void readApplicationLogs().then((history) => {
+      if (!cancelled) setLogs((items) => mergeLogs(history, items));
+    }).catch((error) => appendLog(`[log-error] ${toErrorMessage(error)}`));
     getConfig()
       .then(async (nextConfig) => {
         if (cancelled) return;
@@ -128,7 +124,7 @@ export function App() {
 
     listTasks()
       .then((initialTasks) => {
-        if (!cancelled) setTasks(initialTasks.map(taskFromSnapshot));
+        if (!cancelled) setTasks(initialTasks);
       })
       .catch((error) => appendLog(`[task-error] ${toErrorMessage(error)}`));
 
@@ -141,7 +137,7 @@ export function App() {
 
     void listenTaskStatus((payload) => {
       if (cancelled) return;
-      setTasks((items) => upsertTask(items, payload, pendingTaskRef.current));
+      setTasks((items) => upsertTask(items, payload));
 
       if (payload.kind === "parse") {
         setActiveParseTaskId(payload.id);
@@ -153,18 +149,20 @@ export function App() {
       if ((payload.kind === "loginWeb" || payload.kind === "loginTv")
         && ["completed", "failed", "canceled"].includes(payload.status)) {
         setLoginBusy(false);
+        setLoginTaskId(null);
       }
+      if ((payload.kind === "loginWeb" || payload.kind === "loginTv") && ["queued", "running"].includes(payload.status)) setLoginTaskId(payload.id);
     }).then((unlisten) => unlisteners.push(unlisten));
 
-    void listenTaskLog((payload) => {
-      if (!cancelled) appendLog(`[${payload.taskId.slice(0, 8)}] ${payload.line}`);
+    void listenApplicationLog((payload) => {
+      if (!cancelled) setLogs((items) => mergeLogs(items, [payload]));
     }).then((unlisten) => unlisteners.push(unlisten));
 
     void listenLoginQr((payload) => {
       if (cancelled) return;
       setLoginQr(payload);
       setAccountDialogOpen(true);
-      setLoginMethod("scan");
+      setLoginMethod(payload.mode === "tv" ? "tv" : "scan");
       appendLog(`[login-qr] 二维码已生成: ${payload.imagePath}`);
     }).then((unlisten) => unlisteners.push(unlisten));
 
@@ -239,15 +237,27 @@ export function App() {
     if (!result) return;
     try {
       const command = await buildDownloadPreview({ input: result.input, config, parseId: result.id });
-      pendingTaskRef.current = { input: result.input, title: result.title, command: command.display };
       setActive("tasks");
       appendLog(`[download] ${command.display}`);
-      const output = await runDownload({ input: result.input, config, parseId: result.id });
-      appendLog(output.output.trim() || `[download] exit ${output.exitCode ?? "--"}`);
+      const task = await runDownload({ input: result.input, config, parseId: result.id }, result.title);
+      setTasks((items) => upsertTask(items, task));
+      appendLog(`[download] 已加入队列: ${result.title}`);
     } catch (error) {
       appendLog(`[download-error] ${toErrorMessage(error)}`);
     }
   };
+
+  const handleDownloadAction = async (ids: string[], action: DownloadAction) => {
+    try {
+      const result = await controlDownloads(ids, action);
+      setTasks((items) => result.updated.reduce(upsertTask, items.filter((task) => !result.removed.includes(task.id))));
+      result.errors.forEach((error) => appendLog(`[task-error] ${error}`));
+    } catch (error) { appendLog(`[task-error] ${toErrorMessage(error)}`); }
+  };
+  useEffect(() => {
+    const interval = window.setInterval(() => { void listTasks().then((snapshots) => setTasks((items) => snapshots.map((snapshot) => { const current = items.find((task) => task.id === snapshot.id); return current && (current.revision ?? 0) > (snapshot.revision ?? 0) ? current : snapshot; }))).catch((error) => appendLog(`[task-error] ${toErrorMessage(error)}`)); }, 1500);
+    return () => window.clearInterval(interval);
+  }, []);
 
   const handleDetectTools = async () => {
     try {
@@ -269,25 +279,26 @@ export function App() {
     }
   };
 
-  const handleScanLogin = async () => {
+  const handleScanLogin = async (mode: "web" | "tv") => {
     const scanConfig: AppConfig = {
       ...config,
-      auth: { ...config.auth, apiMode: "WEB", cookie: "" },
+      auth: { ...config.auth, apiMode: mode === "web" ? "WEB" : "TV", cookie: mode === "web" ? "" : config.auth.cookie, accessToken: mode === "tv" ? "" : config.auth.accessToken },
     };
     setLoginBusy(true);
     setLoginQr(null);
     try {
       const saved = await saveConfig(scanConfig);
       setConfig(saved);
-      appendLog("[login] web scan");
-      const result = await runLogin(saved, "web");
+      appendLog(`[login] ${mode} scan`);
+      const result = await runLogin(saved, mode);
       appendLog(result.output.trim() || `[login] exit ${result.exitCode ?? "--"}`);
-      const info = await refreshAccount(saved);
-      if (info.isLoggedIn) setLoginQr(null);
+      await refreshAccount(saved);
+      if (result.success) setLoginQr(null);
     } catch (error) {
       appendLog(`[login-error] ${toErrorMessage(error)}`);
     } finally {
       setLoginBusy(false);
+      setLoginQr(null);
     }
   };
 
@@ -303,6 +314,19 @@ export function App() {
     } finally {
       setLoginBusy(false);
     }
+  };
+
+  const handleSaveToken = async () => {
+    setLoginBusy(true);
+    try {
+      const nextConfig: AppConfig = { ...config, auth: { ...config.auth, apiMode: config.auth.apiMode === "WEB" ? "APP" : config.auth.apiMode } };
+      const saved = await saveConfig(nextConfig);
+      setConfig(saved);
+      await refreshAccount(saved);
+      appendLog("[account] Token 已保存，播放时由所选接口校验");
+    } catch (error) {
+      appendLog(`[account-error] ${toErrorMessage(error)}`);
+    } finally { setLoginBusy(false); }
   };
 
   const handleLogout = async () => {
@@ -340,8 +364,8 @@ export function App() {
           })}
         </nav>
         <div className="sidebar-footer">
-          <span className={toolResult?.bbdownFound ? "tool-state ok" : "tool-state"}>
-            <i />{toolResult?.bbdownVersion ?? "BBDown 未检测"}
+          <span className={toolResult?.coreAvailable ? "tool-state ok" : "tool-state"}>
+            <i />{toolResult?.coreAvailable ? "内置核心已就绪" : "等待桌面后端"}
           </span>
         </div>
       </aside>
@@ -354,8 +378,8 @@ export function App() {
               {account.avatarUrl ? <img alt="账号头像" referrerPolicy="no-referrer" src={account.avatarUrl} /> : <UserRound size={18} />}
             </div>
             <div>
-              <strong>{account.isLoggedIn ? account.name : "未登录"}</strong>
-              <span>{account.isLoggedIn ? account.vipLabel ?? `UID ${account.mid}` : "点击登录账号"}</span>
+              <strong>{account.isLoggedIn ? account.name : account.tokenConfigured ? "Token 已配置" : "未登录"}</strong>
+              <span>{account.isLoggedIn ? `WEB · ${account.vipLabel ?? `UID ${account.mid}`}` : account.tokenConfigured ? `${config.auth.apiMode} · 播放时校验` : "点击登录账号"}</span>
             </div>
           </button>
         </header>
@@ -381,7 +405,7 @@ export function App() {
           />
         ) : null}
 
-        {active === "tasks" ? <TasksPage tasks={tasks} onStopTask={(id) => stopTask(id).catch((error) => appendLog(`[stop-error] ${toErrorMessage(error)}`))} /> : null}
+        {active === "tasks" ? <DownloadsPage tasks={tasks} onAction={handleDownloadAction} onOpenDirectory={(id) => void openTaskDirectory(id).catch((error) => appendLog(`[open-error] ${toErrorMessage(error)}`))} onAddDownload={() => setActive("workspace")} /> : null}
         {active === "settings" ? (
           <SettingsPage
             config={config}
@@ -399,11 +423,17 @@ export function App() {
       {accountDialogOpen ? (
         <AccountDialog
           account={account}
+          apiMode={config.auth.apiMode}
+          accessToken={config.auth.accessToken ?? ""}
           busy={loginBusy}
           cookie={config.auth.cookie ?? ""}
           loginQr={loginQr}
           method={loginMethod}
           onClose={() => setAccountDialogOpen(false)}
+          onApiModeChange={(apiMode) => setConfig({ ...config, auth: { ...config.auth, apiMode } })}
+          onTokenChange={(accessToken) => setConfig({ ...config, auth: { ...config.auth, accessToken } })}
+          onSaveToken={handleSaveToken}
+          onCancelLogin={() => { if (loginTaskId) void stopTask(loginTaskId).catch((error) => appendLog(`[login-error] ${toErrorMessage(error)}`)); }}
           onCookieChange={(cookie) => setConfig({ ...config, auth: { ...config.auth, cookie } })}
           onMethodChange={setLoginMethod}
           onLogout={handleLogout}
@@ -412,40 +442,6 @@ export function App() {
         />
       ) : null}
     </div>
-  );
-}
-
-function TasksPage({ tasks, onStopTask }: { tasks: RuntimeTask[]; onStopTask: (id: string) => void }) {
-  const downloads = tasks.filter((task) => task.kind === "download");
-  const current = downloads.filter((task) => ["queued", "running", "stopping"].includes(task.status));
-  const finished = downloads.filter((task) => !["queued", "running", "stopping"].includes(task.status));
-  return (
-    <section className="primary-panel tasks-panel">
-      <TaskGroup title="当前下载" tasks={current} onStopTask={onStopTask} />
-      <TaskGroup title="已完成与历史" tasks={finished} onStopTask={onStopTask} />
-    </section>
-  );
-}
-
-function TaskGroup({ title, tasks, onStopTask }: { title: string; tasks: RuntimeTask[]; onStopTask: (id: string) => void }) {
-  return (
-    <section className="task-group">
-      <div className="section-title"><Activity size={18} /><h3>{title}</h3><span>{tasks.length}</span></div>
-      {tasks.length ? (
-        <div className="task-list">
-          {tasks.map((task) => (
-            <article className="task-item" key={task.id}>
-              <div><h4>{task.title}</h4><span>{task.latestMessage ?? task.createdAt}</span></div>
-              <span className={`task-status ${task.status}`}>{statusLabel(task.status)}</span>
-              {task.currentPartIndex && task.totalParts ? <span>P {task.currentPartIndex} / {task.totalParts}</span> : null}
-              {task.status === "running" || task.status === "stopping" ? (
-                <button className="icon-action danger" onClick={() => onStopTask(task.id)} title="停止任务" type="button"><Square size={16} /></button>
-              ) : null}
-            </article>
-          ))}
-        </div>
-      ) : <div className="group-empty">暂无任务</div>}
-    </section>
   );
 }
 
@@ -463,14 +459,26 @@ function SettingsPage({
   toolResult: ToolDetectionResult | null;
   onDetectTools: () => void;
   onOpenDirectory: () => void;
-  onOpenToolDownload: (tool: "bbdown" | "ffmpeg") => void;
+  onOpenToolDownload: (tool: "ffmpeg") => void;
   onSaveConfig: () => void;
 }) {
   return (
     <div className="settings-page">
       <section className="primary-panel settings-panel">
         <div className="section-title"><Settings size={19} /><h3>基础设置</h3></div>
-        <PathInput label="BBDown" value={config.tools.bbdownPath} onChange={(value) => setConfig({ ...config, tools: { ...config.tools, bbdownPath: value } })} onDownload={() => onOpenToolDownload("bbdown")} />
+        <label className="path-input">
+          <span>播放接口</span>
+          <select value={config.auth.apiMode} onChange={(event) => setConfig({ ...config, auth: { ...config.auth, apiMode: event.target.value as ApiMode } })}>
+            <option value="WEB">WEB · Cookie</option><option value="TV">TV · TV 扫码 / Token</option>
+            <option value="APP">APP · Token / 公开内容</option><option value="INTL">INTL · 国际版番剧</option>
+          </select>
+        </label>
+        <div className="queue-settings">
+          <label><span>同时下载任务数</span><input type="number" min={1} max={8} value={config.downloadManager.maxConcurrentTasks} onChange={(event) => setConfig({ ...config, downloadManager: { ...config.downloadManager, maxConcurrentTasks: Math.min(8, Math.max(1, Number(event.target.value))) } })} /></label>
+          <label><span>每个任务的连接数</span><input type="number" min={1} max={16} value={config.downloadManager.connectionsPerTask} onChange={(event) => setConfig({ ...config, downloadManager: { ...config.downloadManager, connectionsPerTask: Math.min(16, Math.max(1, Number(event.target.value))) } })} /></label>
+          <label className="queue-auto-resume"><input type="checkbox" checked={config.downloadManager.resumeOnStart} onChange={(event) => setConfig({ ...config, downloadManager: { ...config.downloadManager, resumeOnStart: event.target.checked } })} />启动后自动继续未完成任务</label>
+          <p>并发上限控制后续启动的任务，不打断当前下载；连接数用于新任务。</p>
+        </div>
         <PathInput label="FFmpeg" value={config.tools.ffmpegPath ?? ""} onChange={(value) => setConfig({ ...config, tools: { ...config.tools, ffmpegPath: value } })} onDownload={() => onOpenToolDownload("ffmpeg")} />
         <label className="path-input">
           <span>下载目录</span>
@@ -489,15 +497,21 @@ function SettingsPage({
   );
 }
 
-function LogsPage({ logs }: { logs: string[] }) {
+function LogsPage({ logs }: { logs: ApplicationLogEntry[] }) {
   return (
     <section className="primary-panel terminal-panel">
       <div className="section-title"><Terminal size={19} /><h3>应用日志</h3></div>
       <div className="log-lines">
-        {logs.length ? logs.map((line, index) => <code key={`${line}-${index}`}>{line}</code>) : <span>暂无日志</span>}
+        {logs.length ? logs.map((entry) => <code key={entry.id}>[{new Date(Number(entry.timestamp) * 1000).toLocaleString()}] {entry.line}</code>) : <span>暂无日志</span>}
       </div>
     </section>
   );
+}
+
+function mergeLogs(current: ApplicationLogEntry[], incoming: ApplicationLogEntry[]): ApplicationLogEntry[] {
+  const unique = new Map(current.map((entry) => [entry.id, entry]));
+  for (const entry of incoming) unique.set(entry.id, entry);
+  return [...unique.values()].sort((a, b) => Number(a.timestamp) - Number(b.timestamp)).slice(-1000);
 }
 
 function PathInput({
@@ -522,56 +536,15 @@ function PathInput({
   );
 }
 
-function taskFromSnapshot(task: TaskSnapshot): RuntimeTask {
-  return {
-    id: task.id,
-    kind: task.kind,
-    input: task.input,
-    title: task.title ?? task.input,
-    status: task.status,
-    phase: task.phase,
-    latestMessage: task.latestMessage,
-    currentPartIndex: task.currentPartIndex,
-    totalParts: task.totalParts,
-    startedAt: task.startedAt,
-    finishedAt: task.finishedAt,
-    exitCode: task.exitCode,
-    command: task.input,
-    createdAt: task.startedAt ?? new Date().toLocaleString(),
-  };
-}
-
-function upsertTask(
-  items: RuntimeTask[],
-  payload: TaskSnapshot,
-  pending: { input: string; title: string; command: string } | null,
-) {
-  const index = items.findIndex((item) => item.id === payload.id);
-  const previous = index >= 0 ? items[index] : null;
-  const next: RuntimeTask = {
-    ...taskFromSnapshot(payload),
-    title: payload.title ?? previous?.title ?? pending?.title ?? payload.input,
-    command: previous?.command ?? pending?.command ?? payload.input,
-    createdAt: previous?.createdAt ?? new Date().toLocaleString(),
-    output: previous?.output,
-  };
-  return index >= 0 ? items.map((item, itemIndex) => itemIndex === index ? next : item) : [next, ...items];
+function upsertTask(items: TaskSnapshot[], payload: TaskSnapshot): TaskSnapshot[] {
+  const index = items.findIndex((task) => task.id === payload.id);
+  if (index >= 0 && (items[index].revision ?? 0) > (payload.revision ?? 0)) return items;
+  return index >= 0 ? items.map((task, i) => i === index ? payload : task) : [payload, ...items];
 }
 
 function compactSessionTitle(value: string) {
   const match = value.match(/(?:BV|bv)[A-Za-z0-9]{10}|(?:av|AV)\d+|(?:ep|EP|ss|SS)\d+/);
   return match?.[0] ?? (value.length > 24 ? `${value.slice(0, 24)}...` : value);
-}
-
-function statusLabel(status: BackendTaskStatus) {
-  return {
-    queued: "等待中",
-    running: "下载中",
-    stopping: "停止中",
-    completed: "已完成",
-    failed: "失败",
-    canceled: "已取消",
-  }[status];
 }
 
 function toErrorMessage(error: unknown) {

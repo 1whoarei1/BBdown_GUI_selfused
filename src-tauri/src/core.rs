@@ -1,14 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolPaths {
-    pub bbdown_path: String,
     pub ffmpeg_path: Option<String>,
-    pub mp4box_path: Option<String>,
-    pub aria2c_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,11 +17,12 @@ pub struct AuthConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum ApiMode {
-    WEB,
-    TV,
-    APP,
-    INTL,
+    Web,
+    Tv,
+    App,
+    Intl,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,9 +51,6 @@ pub struct DownloadOptions {
 #[serde(rename_all = "camelCase")]
 pub struct AdvancedOptions {
     pub force_http: bool,
-    pub use_aria2c: bool,
-    pub aria2c_args: Option<String>,
-    pub use_mp4box: bool,
     pub allow_pcdn: bool,
     pub video_ascending: bool,
     pub audio_ascending: bool,
@@ -72,11 +66,30 @@ pub struct AdvancedOptions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
+    #[serde(default)]
+    pub download_manager: DownloadManagerOptions,
     pub tools: ToolPaths,
     pub work_dir: String,
     pub auth: AuthConfig,
     pub default_options: DownloadOptions,
     pub advanced: AdvancedOptions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DownloadManagerOptions {
+    pub max_concurrent_tasks: u32,
+    pub connections_per_task: u32,
+    pub resume_on_start: bool,
+}
+impl Default for DownloadManagerOptions {
+    fn default() -> Self {
+        Self {
+            max_concurrent_tasks: 2,
+            connections_per_task: 4,
+            resume_on_start: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +116,7 @@ pub enum ContentKind {
     MultiPartVideo,
     BangumiEpisode,
     BangumiMultiEpisode,
+    VideoList,
     Unknown,
 }
 
@@ -188,8 +202,11 @@ pub struct OwnerInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PartInfoV2 {
+    pub watch_url: Option<String>,
     pub page_number: u32,
     pub cid: Option<u64>,
+    pub aid: Option<u64>,
+    pub bvid: Option<String>,
     pub title: String,
     pub duration_seconds: Option<u64>,
     pub video_streams: Vec<StreamInfo>,
@@ -199,8 +216,7 @@ pub struct PartInfoV2 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MetadataSource {
-    BilibiliAndBbdown,
-    BbdownOnly,
+    Bilibili,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,6 +243,8 @@ pub struct ParseResultV2 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountInfo {
+    #[serde(default)]
+    pub token_configured: bool,
     pub is_logged_in: bool,
     pub mid: Option<u64>,
     pub name: Option<String>,
@@ -235,38 +253,12 @@ pub struct AccountInfo {
     pub source: String,
 }
 
-impl ParseResult {
-    pub fn placeholder(input: String, warning: &str) -> Self {
-        Self {
-            id: Uuid::new_v4().to_string(),
-            input,
-            content_kind: ContentKind::Unknown,
-            aid_or_episode_id: None,
-            bvid: None,
-            title: "无法解析".to_string(),
-            owner_name: None,
-            owner_space_url: None,
-            publish_time: None,
-            duration: None,
-            part_count: None,
-            cover_path: None,
-            save_path: None,
-            parts: vec![],
-            raw_output: String::new(),
-            warnings: vec![warning.to_string()],
-            error_message: Some(warning.to_string()),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDetectionResult {
-    pub bbdown_found: bool,
+    pub core_available: bool,
     pub ffmpeg_found: bool,
-    pub mp4box_found: bool,
-    pub aria2c_found: bool,
-    pub bbdown_version: Option<String>,
+    pub ffmpeg_version: Option<String>,
     pub messages: Vec<String>,
 }
 
@@ -288,15 +280,13 @@ pub struct CommandRunResult {
 
 pub fn default_config() -> AppConfig {
     AppConfig {
+        download_manager: DownloadManagerOptions::default(),
         tools: ToolPaths {
-            bbdown_path: "../bin/BBDown.exe".to_string(),
-            ffmpeg_path: Some("../bin/ffmpeg.exe".to_string()),
-            mp4box_path: None,
-            aria2c_path: None,
+            ffmpeg_path: Some("ffmpeg".to_string()),
         },
         work_dir: "../download".to_string(),
         auth: AuthConfig {
-            api_mode: ApiMode::WEB,
+            api_mode: ApiMode::Web,
             cookie: None,
             access_token: None,
             user_agent: None,
@@ -322,9 +312,6 @@ pub fn default_config() -> AppConfig {
         },
         advanced: AdvancedOptions {
             force_http: false,
-            use_aria2c: false,
-            aria2c_args: None,
-            use_mp4box: false,
             allow_pcdn: false,
             video_ascending: false,
             audio_ascending: false,
@@ -339,13 +326,8 @@ pub fn default_config() -> AppConfig {
     }
 }
 
-pub fn default_config_for_paths(
-    bbdown_path: String,
-    ffmpeg_path: Option<String>,
-    work_dir: String,
-) -> AppConfig {
+pub fn default_config_for_paths(ffmpeg_path: Option<String>, work_dir: String) -> AppConfig {
     let mut config = default_config();
-    config.tools.bbdown_path = bbdown_path;
     config.tools.ffmpeg_path = ffmpeg_path;
     config.work_dir = work_dir;
     config
@@ -356,4 +338,33 @@ pub fn candidate_existing_file(paths: impl IntoIterator<Item = PathBuf>) -> Opti
         .into_iter()
         .find(|path| path.exists())
         .map(|path| path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn old_tool_fields_are_removed_without_losing_download_preferences() {
+        let mut value = serde_json::to_value(default_config()).unwrap();
+        value["tools"]["bbdownPath"] = "old/BBDown.exe".into();
+        value["tools"]["aria2cPath"] = "old/aria2c.exe".into();
+        value["tools"]["mp4boxPath"] = "old/MP4Box.exe".into();
+        value["advanced"]["useAria2c"] = true.into();
+        value["advanced"]["useMp4box"] = true.into();
+        value["defaultOptions"]["pageSelection"] = "2-4".into();
+        value["workDir"] = "D:/my downloads".into();
+        let config: AppConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(config.work_dir, "D:/my downloads");
+        assert_eq!(config.default_options.page_selection, "2-4");
+        let saved = serde_json::to_value(config).unwrap();
+        assert_eq!(saved["auth"]["apiMode"], "WEB");
+        assert!(saved["tools"].get("bbdownPath").is_none());
+        assert!(saved["advanced"].get("useAria2c").is_none());
+    }
+    #[test]
+    fn all_api_modes_are_readable_and_supported() {
+        let mut config = default_config();
+        config.auth.api_mode = serde_json::from_str("\"TV\"").unwrap();
+        assert!(crate::bilibili::client::BiliClient::new(&config).is_ok());
+    }
 }

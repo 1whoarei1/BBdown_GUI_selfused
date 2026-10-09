@@ -1,11 +1,10 @@
-use super::{VideoId, VideoMetadata};
+use super::VideoMetadata;
 use crate::bilibili::models::{OwnerMetadata, PageMetadata};
 use crate::core::AccountInfo;
 use reqwest::{header, redirect::Policy, Client};
 use serde::Deserialize;
 use std::time::Duration;
 
-const VIEW_API: &str = "https://api.bilibili.com/x/web-interface/view";
 const NAV_API: &str = "https://api.bilibili.com/x/web-interface/nav";
 const DEFAULT_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 BBDownNext/0.1";
@@ -27,33 +26,6 @@ impl MetadataClient {
             .build()
             .map_err(|error| format!("创建 B 站元数据客户端失败: {error}"))?;
         Ok(Self { client })
-    }
-
-    pub async fn fetch_video(
-        &self,
-        video_id: &VideoId,
-        cookie: Option<&str>,
-    ) -> Result<VideoMetadata, String> {
-        let query = match video_id {
-            VideoId::Bvid(value) => vec![("bvid", value.clone())],
-            VideoId::Aid(value) => vec![("aid", value.to_string())],
-        };
-        let mut request = self.client.get(VIEW_API).query(&query);
-        if let Some(cookie) = cookie.filter(|value| !value.trim().is_empty()) {
-            request = request.header(header::COOKIE, cookie);
-        }
-
-        let response = request
-            .send()
-            .await
-            .map_err(|error| format!("请求 B 站视频元数据失败: {error}"))?
-            .error_for_status()
-            .map_err(|error| format!("B 站视频元数据 HTTP 错误: {error}"))?;
-        let raw = response
-            .text()
-            .await
-            .map_err(|error| format!("读取 B 站视频元数据失败: {error}"))?;
-        parse_view_response(&raw)
     }
 
     pub async fn fetch_account(&self, cookie: &str, source: &str) -> Result<AccountInfo, String> {
@@ -99,6 +71,7 @@ pub(crate) fn parse_view_response(raw: &str) -> Result<VideoMetadata, String> {
             face_url: normalize_https(data.owner.face),
         },
         duration_seconds: data.duration,
+        publish_time: data.pubdate.map(|value| value.to_string()),
         pages: data
             .pages
             .into_iter()
@@ -136,6 +109,7 @@ pub(crate) fn parse_nav_response(raw: &str, source: &str) -> Result<AccountInfo,
         .ok_or_else(|| "B 站账号接口缺少 data".to_string())?;
     if !data.is_login {
         return Ok(AccountInfo {
+            token_configured: false,
             is_logged_in: false,
             mid: None,
             name: None,
@@ -146,6 +120,7 @@ pub(crate) fn parse_nav_response(raw: &str, source: &str) -> Result<AccountInfo,
     }
 
     Ok(AccountInfo {
+        token_configured: false,
         is_logged_in: true,
         mid: Some(data.mid),
         name: non_empty(data.uname),
@@ -189,6 +164,7 @@ struct ViewData {
     desc: String,
     pic: String,
     duration: u64,
+    pubdate: Option<u64>,
     owner: ViewOwner,
     #[serde(default)]
     pages: Vec<ViewPage>,
@@ -284,12 +260,12 @@ mod tests {
             }
         }"#;
 
-        let account = parse_nav_response(raw, "bbdownScan").expect("account should parse");
+        let account = parse_nav_response(raw, "nativeScan").expect("account should parse");
 
         assert!(account.is_logged_in);
         assert_eq!(account.mid, Some(123));
         assert_eq!(account.name.as_deref(), Some("测试用户"));
-        assert_eq!(account.source, "bbdownScan");
+        assert_eq!(account.source, "nativeScan");
         assert_eq!(account.vip_label.as_deref(), Some("年度大会员"));
         assert!(account
             .avatar_url

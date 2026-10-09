@@ -92,7 +92,7 @@ export function WorkspacePage({
             onKeyDown={(event) => {
               if (event.key === "Enter") onParse();
             }}
-            placeholder="输入 BV / AV / EP / SS / B 站视频地址"
+            placeholder="BV / AV / EP / SS 或视频、收藏夹、空间、合集链接"
           />
         </div>
         <button className="primary-button parse-button" disabled={parsing} onClick={onParse} type="button">
@@ -212,7 +212,7 @@ function VideoResult({
   onOpenLink: (url: string) => void;
   onTogglePart: (pageNumber: number) => void;
 }) {
-  const videoUrl = result.bvid ? `https://www.bilibili.com/video/${result.bvid}` : null;
+  const videoUrl = result.contentKind === "videoList" ? null : result.parts[0]?.watchUrl ?? (result.bvid ? `https://www.bilibili.com/video/${result.bvid}` : null);
 
   return (
     <div className="result-scroll">
@@ -244,10 +244,10 @@ function VideoResult({
             ) : null}
           </div>
           <div className="summary-facts">
-            <span>{result.bvid ?? `AV${result.aid ?? "--"}`}</span>
+            <span>{result.contentKind === "videoList" ? "视频列表" : result.bvid ?? `AV${result.aid ?? "--"}`}</span>
             <span>{formatDuration(result.durationSeconds)}</span>
-            <span>{result.parts.length} 个分 P</span>
-            <span>{result.metadataSource === "bilibiliAndBbdown" ? "完整信息" : "BBDown 信息"}</span>
+            <span>{result.parts.length} {result.contentKind === "videoList" ? "个条目" : "个分 P"}</span>
+            <span>{"B 站接口信息"}</span>
           </div>
         </div>
       </div>
@@ -265,7 +265,7 @@ function VideoResult({
 
       <section className="parts-section">
         <div className="section-title-row">
-          <h3>分 P 与流信息</h3>
+          <h3>{result.contentKind === "videoList" ? "列表条目与流信息" : "分 P 与流信息"}</h3>
           <span>{result.parts.length}P</span>
         </div>
         <div className="stream-list">
@@ -279,7 +279,7 @@ function VideoResult({
               </button>
               {expandedParts.has(part.pageNumber) ? (
                 <div className="stream-details">
-                  <div className="part-meta"><span>CID {part.cid ?? "--"}</span></div>
+                  <div className="part-meta"><span>CID {part.cid ?? "--"}</span>{part.watchUrl ? <button className="link-button" onClick={() => onOpenLink(part.watchUrl!)} type="button">{part.bvid ?? "打开剧集"}<ExternalLink size={13} /></button> : null}</div>
                   {[...part.videoStreams, ...part.audioStreams].map((stream, index) => (
                     <div className="stream-row" key={`${stream.kind}-${index}`}>
                       <span className={`stream-kind ${stream.kind}`}>{stream.kind === "video" ? "视频" : "音频"}</span>
